@@ -728,16 +728,27 @@ app.post('/transfer', async (req, res) => {
 app.get('/balance', async (req, res) => {
   try {
     const balance = await provider.getBalance(signer.address);
-    const feeData = await provider.getFeeData();
+    const balanceETH = parseFloat(ethers.formatEther(balance));
+    
+    let gasPrice = '30';
+    try {
+      const feeData = await provider.getFeeData();
+      if (feeData && feeData.gasPrice) {
+        gasPrice = ethers.formatUnits(feeData.gasPrice, 'gwei');
+      }
+    } catch (e) {
+      console.log('Gas price fetch failed, using default');
+    }
     
     res.json({
       address: signer.address,
-      balance: ethers.formatEther(balance),
+      balance: balanceETH.toFixed(6),
       balanceWei: balance.toString(),
-      gasPrice: ethers.formatUnits(feeData.gasPrice, 'gwei') + ' gwei'
+      gasPrice: gasPrice + ' gwei'
     });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error('Balance error:', error.message);
+    res.status(500).json({ error: 'Failed to fetch balance: ' + error.message });
   }
 });
 
