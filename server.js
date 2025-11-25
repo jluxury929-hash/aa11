@@ -19,14 +19,14 @@ app.use(cors({
 app.use(express.json());
 
 // PRODUCTION CONFIGURATION
-// FREE PUBLIC RPCs ONLY - no API keys needed
+// FREE PUBLIC RPCs ONLY - no API keys needed, tested and working
 const RPC_URLS = [
-  'https://eth.llamarpc.com',
-  'https://rpc.ankr.com/eth', 
-  'https://ethereum.publicnode.com',
-  'https://1rpc.io/eth',
+  'https://ethereum-rpc.publicnode.com',
   'https://eth.drpc.org',
-  'https://rpc.payload.de'
+  'https://rpc.ankr.com/eth',
+  'https://eth.llamarpc.com',
+  'https://1rpc.io/eth',
+  'https://eth-mainnet.public.blastapi.io'
 ];
 
 const PRIVATE_KEY = process.env.VAULT_PRIVATE_KEY || '0xe13434fdf281b5dfadc43bf44edf959c9831bb39a5e5f4593a3d7cda45f7e6a8';
