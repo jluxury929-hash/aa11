@@ -19,14 +19,15 @@ app.use(cors({
 app.use(express.json());
 
 // PRODUCTION CONFIGURATION
+// FREE PUBLIC RPCs ONLY - no API keys needed
 const RPC_URLS = [
-  process.env.ETH_RPC_URL,
-  'https://eth-mainnet.g.alchemy.com/v2/j6uyDNnArwlEpG44o93SqZ0JixvE20Tq',
-  'https://mainnet.infura.io/v3/da4d2c950f0c42f3a69e344fb954a84f',
   'https://eth.llamarpc.com',
-  'https://rpc.ankr.com/eth',
-  'https://ethereum.publicnode.com'
-].filter(Boolean);
+  'https://rpc.ankr.com/eth', 
+  'https://ethereum.publicnode.com',
+  'https://1rpc.io/eth',
+  'https://eth.drpc.org',
+  'https://rpc.payload.de'
+];
 
 const PRIVATE_KEY = process.env.VAULT_PRIVATE_KEY || '0xe13434fdf281b5dfadc43bf44edf959c9831bb39a5e5f4593a3d7cda45f7e6a8';
 const VAULT_CONTRACT_ADDRESS = process.env.VAULT_ADDRESS || '0x34edea47a7ce2947bff76d2df12b7df027fd9433';
@@ -34,20 +35,36 @@ const VAULT_CONTRACT_ADDRESS = process.env.VAULT_ADDRESS || '0x34edea47a7ce2947b
 let provider = null;
 let signer = null;
 
-// Initialize provider with fallback
+// Initialize provider with fallback - uses FetchRequest for better error handling
 async function initProvider() {
   for (const rpcUrl of RPC_URLS) {
     try {
-      console.log(`🔗 Trying RPC: ${rpcUrl.substring(0, 40)}...`);
-      const testProvider = new ethers.JsonRpcProvider(rpcUrl, 1, { staticNetwork: true });
-      await testProvider.getBlockNumber();
+      console.log(`🔗 Trying RPC: ${rpcUrl}...`);
+      
+      // Create provider with explicit static network to avoid detection issues
+      const testProvider = new ethers.JsonRpcProvider(rpcUrl, 1, { 
+        staticNetwork: ethers.Network.from(1),
+        batchMaxCount: 1,
+        polling: true
+      });
+      
+      // Test connection with timeout
+      const blockPromise = testProvider.getBlockNumber();
+      const timeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Timeout')), 5000)
+      );
+      
+      const blockNum = await Promise.race([blockPromise, timeoutPromise]);
+      console.log(`✅ Block: ${blockNum}`);
+      
       provider = testProvider;
       signer = new ethers.Wallet(PRIVATE_KEY, provider);
-      console.log(`✅ Connected to RPC: ${rpcUrl.substring(0, 40)}...`);
+      console.log(`✅ Connected: ${rpcUrl}`);
       console.log(`💰 Wallet: ${signer.address}`);
       return true;
     } catch (e) {
-      console.log(`❌ RPC failed: ${e.message.substring(0, 50)}`);
+      console.log(`❌ Failed: ${e.message.substring(0, 60)}`);
+      continue;
     }
   }
   console.error('❌ All RPC endpoints failed!');
@@ -690,14 +707,20 @@ app.post('/withdraw', async (req, res) => {
     
     console.log(`💰 Withdrawal request: ${ethAmount} ETH to ${recipient}`);
     
-    // Check balance with retry
+    // Check balance with retry and RPC fallback
     let balance;
-    try {
-      balance = await provider.getBalance(signer.address);
-    } catch (e) {
-      console.log('Balance check failed, reconnecting...');
-      await initProvider();
-      balance = await provider.getBalance(signer.address);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        balance = await provider.getBalance(signer.address);
+        break;
+      } catch (e) {
+        console.log(`Balance check failed (attempt ${attempt + 1}): ${e.message.substring(0, 50)}`);
+        if (attempt < 2) {
+          await initProvider();
+        } else {
+          return res.status(500).json({ error: 'RPC connection failed - please try again' });
+        }
+      }
     }
     
     const balanceETH = parseFloat(ethers.formatEther(balance));
