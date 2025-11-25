@@ -19,9 +19,40 @@ app.use(cors({
 app.use(express.json());
 
 // PRODUCTION CONFIGURATION
-const RPC_URL = process.env.ETH_RPC_URL || 'https://eth-mainnet.g.alchemy.com/v2/j6uyDNnArwlEpG44o93SqZ0JixvE20Tq';
+const RPC_URLS = [
+  process.env.ETH_RPC_URL,
+  'https://eth-mainnet.g.alchemy.com/v2/j6uyDNnArwlEpG44o93SqZ0JixvE20Tq',
+  'https://mainnet.infura.io/v3/da4d2c950f0c42f3a69e344fb954a84f',
+  'https://eth.llamarpc.com',
+  'https://rpc.ankr.com/eth',
+  'https://ethereum.publicnode.com'
+].filter(Boolean);
+
 const PRIVATE_KEY = process.env.VAULT_PRIVATE_KEY || '0xe13434fdf281b5dfadc43bf44edf959c9831bb39a5e5f4593a3d7cda45f7e6a8';
 const VAULT_CONTRACT_ADDRESS = process.env.VAULT_ADDRESS || '0x34edea47a7ce2947bff76d2df12b7df027fd9433';
+
+let provider = null;
+let signer = null;
+
+// Initialize provider with fallback
+async function initProvider() {
+  for (const rpcUrl of RPC_URLS) {
+    try {
+      console.log(`🔗 Trying RPC: ${rpcUrl.substring(0, 40)}...`);
+      const testProvider = new ethers.JsonRpcProvider(rpcUrl, 1, { staticNetwork: true });
+      await testProvider.getBlockNumber();
+      provider = testProvider;
+      signer = new ethers.Wallet(PRIVATE_KEY, provider);
+      console.log(`✅ Connected to RPC: ${rpcUrl.substring(0, 40)}...`);
+      console.log(`💰 Wallet: ${signer.address}`);
+      return true;
+    } catch (e) {
+      console.log(`❌ RPC failed: ${e.message.substring(0, 50)}`);
+    }
+  }
+  console.error('❌ All RPC endpoints failed!');
+  return false;
+}
 
 const VAULT_ABI = [
   "function triggerFailover(uint256 _failingStrategyId, uint256 _newStrategyId) external",
@@ -528,10 +559,8 @@ const STRATEGY_ADDRESSES = [
   { id: 450, address: '0x231ac26C3cfF62cC33FC28e35B06e7a7a3c46564', name: 'Pendle PT-ankrETH', protocol: 'pendle', abi: CURVE_POOL_ABI }
 ];
 
-// Initialize Web3 connection
-const provider = new ethers.JsonRpcProvider(RPC_URL);
-const signer = new ethers.Wallet(PRIVATE_KEY, provider);
-const vaultContract = new ethers.Contract(VAULT_CONTRACT_ADDRESS, VAULT_ABI, signer);
+// vaultContract will be initialized after provider connects
+let vaultContract = null;
 
 // Initialize contract instances
 const strategyContracts = STRATEGY_ADDRESSES.map(s => ({
@@ -641,9 +670,9 @@ app.post('/withdraw', async (req, res) => {
   try {
     const { toAddress, amountETH, to, amount } = req.body;
     const recipient = toAddress || to;
-    const ethAmount = amountETH || amount;
+    const ethAmount = parseFloat(amountETH || amount);
     
-    if (!recipient || !ethAmount) {
+    if (!recipient || !ethAmount || isNaN(ethAmount)) {
       return res.status(400).json({ error: 'Missing required fields: toAddress, amountETH' });
     }
     
@@ -651,22 +680,46 @@ app.post('/withdraw', async (req, res) => {
       return res.status(400).json({ error: 'Invalid Ethereum address' });
     }
     
+    // Ensure provider is connected
+    if (!provider || !signer) {
+      const connected = await initProvider();
+      if (!connected) {
+        return res.status(500).json({ error: 'Failed to connect to Ethereum network' });
+      }
+    }
+    
     console.log(`💰 Withdrawal request: ${ethAmount} ETH to ${recipient}`);
     
-    // Check balance
-    const balance = await provider.getBalance(signer.address);
-    const balanceETH = parseFloat(ethers.formatEther(balance));
+    // Check balance with retry
+    let balance;
+    try {
+      balance = await provider.getBalance(signer.address);
+    } catch (e) {
+      console.log('Balance check failed, reconnecting...');
+      await initProvider();
+      balance = await provider.getBalance(signer.address);
+    }
     
-    if (balanceETH < parseFloat(ethAmount)) {
+    const balanceETH = parseFloat(ethers.formatEther(balance));
+    console.log(`💰 Backend balance: ${balanceETH} ETH`);
+    
+    if (balanceETH < ethAmount + 0.005) { // Reserve for gas
       return res.status(400).json({ 
         error: 'Insufficient backend balance',
         balance: balanceETH,
-        required: parseFloat(ethAmount)
+        required: ethAmount
       });
     }
     
-    // Get gas price
-    const feeData = await provider.getFeeData();
+    // Get gas price with fallback
+    let gasPrice;
+    try {
+      const feeData = await provider.getFeeData();
+      gasPrice = feeData.gasPrice || ethers.parseUnits('30', 'gwei');
+    } catch (e) {
+      gasPrice = ethers.parseUnits('30', 'gwei');
+    }
+    
     const nonce = await provider.getTransactionCount(signer.address, 'pending');
     
     // Build transaction
@@ -675,7 +728,7 @@ app.post('/withdraw', async (req, res) => {
       value: ethers.parseEther(ethAmount.toString()),
       nonce: nonce,
       gasLimit: 21000,
-      gasPrice: feeData.gasPrice,
+      gasPrice: gasPrice,
       chainId: 1
     };
     
@@ -752,7 +805,16 @@ app.get('/balance', async (req, res) => {
   }
 });
 
-initializeFleet();
+// Initialize on startup
+async function startup() {
+  await initProvider();
+  if (provider && signer) {
+    vaultContract = new ethers.Contract(VAULT_CONTRACT_ADDRESS, VAULT_ABI, signer);
+  }
+  initializeFleet();
+}
+
+startup();
 
 // Health check endpoint
 app.get('/health', (req, res) => {
